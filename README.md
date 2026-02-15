@@ -29,7 +29,7 @@ The goal of SafeHer is to build a reliable and discreet personal safety system t
 - Profile and trusted contacts interfaces built
 - Supabase integration scaffolded
 
-> ⚠️ At this stage, many features exist as **frontend implementations and workflows**,  
+> ⚠️ At this stage , many features exist as **frontend implementations and workflows**,  
 > while complete backend enforcement and real-world reliability are still in progress.
 
 ---
