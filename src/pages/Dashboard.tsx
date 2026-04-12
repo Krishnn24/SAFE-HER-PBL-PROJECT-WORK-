@@ -3,7 +3,8 @@ import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Shield, LogOut, ArrowLeft, Loader2, Lock } from "lucide-react";
-import TrustedContactsSection from "@/components/dashboard/TrustedContactsSection";
+import TrustedContactsSection from "@/components/dashboard/TrustedContactsSection"; 
+import FakeCallSection from "@/components/dashboard/FakeCallSection";
 import SOSAlertsSection from "@/components/dashboard/SOSAlertsSection";
 import ProfileSettingsSection from "@/components/dashboard/ProfileSettingsSection";
 import PoliceStationLocatorSection from "@/components/dashboard/PoliceStationLocatorSection";
@@ -146,6 +147,7 @@ const Dashboard = () => {
           <SOSAlertsSection />
           <ProfileSettingsSection />
           <PoliceStationLocatorSection />
+          <FakeCallSection />
         </div>
       </main>
 
