@@ -94,7 +94,7 @@ The goal of SafeHer is to build a reliable and discreet personal safety system t
 ## 🔐 Environment Variables
 
 Create a `.env` file in the project root:
-
+https://krishnn24.github.io/PBL-Webpage/
 ```env
 VITE_SUPABASE_URL=your_supabase_project_url
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
