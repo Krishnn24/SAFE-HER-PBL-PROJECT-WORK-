@@ -90,6 +90,8 @@ const PoliceStationLocatorSection = () => {
   const [error, setError] = useState<string | null>(null);
   const [manualLocation, setManualLocation] = useState("");
 
+  const [hasSearched, setHasSearched] = useState(false);
+
   const parseStations = useCallback((data: any, lat: number, lon: number): PoliceStation[] => {
     return (data.elements || [])
       .map((element: any) => {
@@ -122,14 +124,19 @@ const PoliceStationLocatorSection = () => {
   const fetchPoliceStations = useCallback(async (lat: number, lon: number) => {
     setLoading(true);
     setError(null);
+    setHasSearched(true);
 
     try {
       let data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 10000));
+      // eslint-disable-next-line no-console
+      console.log("[PoliceStationLocator] Overpass response (10km):", data);
       let stations = parseStations(data, lat, lon);
 
       if (stations.length === 0) {
         // Widen to 25km before declaring "none found"
         data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 25000));
+        // eslint-disable-next-line no-console
+        console.log("[PoliceStationLocator] Overpass response (25km):", data);
         stations = parseStations(data, lat, lon);
       }
 
@@ -357,13 +364,13 @@ const PoliceStationLocatorSection = () => {
         <PoliceStationMap userLocation={userLocation} policeStations={policeStations} />
 
         {/* Police Stations List */}
-        {(policeStations.length > 0 || loading) && (
+        {(hasSearched || loading) && (
           <div className="space-y-3">
             <h3 className="font-semibold text-foreground flex items-center gap-2">
               <Shield className="w-4 h-4 text-primary" />
               Nearby Police Stations ({policeStations.length})
             </h3>
-            <PoliceStationList stations={policeStations} loading={loading} />
+            <PoliceStationList stations={policeStations} loading={loading} userLocation={userLocation} />
           </div>
         )}
       </CardContent>
