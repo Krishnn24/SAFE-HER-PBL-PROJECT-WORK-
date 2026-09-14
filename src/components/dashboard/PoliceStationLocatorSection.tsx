@@ -39,18 +39,30 @@ const buildOverpassQuery = (lat: number, lon: number, radiusMeters: number) => `
     node["amenity"="police"](around:${radiusMeters},${lat},${lon});
     way["amenity"="police"](around:${radiusMeters},${lat},${lon});
     relation["amenity"="police"](around:${radiusMeters},${lat},${lon});
+    node["government"="police"](around:${radiusMeters},${lat},${lon});
+    way["government"="police"](around:${radiusMeters},${lat},${lon});
+    node["building"="police"](around:${radiusMeters},${lat},${lon});
+    way["building"="police"](around:${radiusMeters},${lat},${lon});
+    node["name"~"[Pp]olice ?[Ss]tation|[Tt]hana|[Cc]howki"](around:${radiusMeters},${lat},${lon});
+    way["name"~"[Pp]olice ?[Ss]tation|[Tt]hana|[Cc]howki"](around:${radiusMeters},${lat},${lon});
   );
   out center;
 `;
 
 // Try each Overpass mirror in turn (each with its own timeout) until one
-// returns a usable response. Throws only if every mirror fails.
-const queryOverpassWithFallback = async (query: string): Promise<any> => {
+// returns a usable response. Throws only if every mirror fails. Also
+// captures per-attempt debug info so failures are diagnosable from the UI
+// instead of a silent dead end.
+const queryOverpassWithFallback = async (
+  query: string,
+  debugLog: any[]
+): Promise<any> => {
   let lastError: unknown = null;
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const attempt: any = { endpoint };
 
     try {
       const response = await fetch(endpoint, {
@@ -63,16 +75,27 @@ const queryOverpassWithFallback = async (query: string): Promise<any> => {
       });
 
       clearTimeout(timeoutId);
+      attempt.status = response.status;
 
       if (!response.ok) {
         // 429/504 etc — try the next mirror instead of giving up
+        attempt.result = "non-2xx, trying next mirror";
         lastError = new Error(`Overpass endpoint ${endpoint} returned ${response.status}`);
+        debugLog.push(attempt);
         continue;
       }
 
-      return await response.json();
+      const json = await response.json();
+      attempt.elementCount = json?.elements?.length ?? 0;
+      attempt.remark = json?.remark; // Overpass puts partial-failure notes here
+      attempt.result = "ok";
+      debugLog.push(attempt);
+      return json;
     } catch (err) {
       clearTimeout(timeoutId);
+      attempt.result = "network/CORS/timeout error";
+      attempt.errorMessage = err instanceof Error ? err.message : String(err);
+      debugLog.push(attempt);
       lastError = err;
       // network error, CORS rejection, or abort — try the next mirror
       continue;
@@ -80,6 +103,39 @@ const queryOverpassWithFallback = async (query: string): Promise<any> => {
   }
 
   throw lastError ?? new Error("All Overpass endpoints failed");
+};
+
+// Fallback: search OSM by name text via Nominatim (already used elsewhere in
+// this file for manual location search) when Overpass's tag-based query
+// comes up empty. This catches police stations that exist in OSM but aren't
+// tagged amenity=police/government=police/building=police.
+const searchNominatimForPolice = async (lat: number, lon: number, debugLog: any[]) => {
+  const delta = 0.25; // roughly ~25km box
+  const viewbox = `${lon - delta},${lat + delta},${lon + delta},${lat - delta}`;
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=police+station&viewbox=${viewbox}&bounded=1&limit=20`;
+
+  const attempt: any = { endpoint: "nominatim (name search fallback)" };
+  try {
+    const response = await fetch(url, {
+      headers: { "User-Agent": "SafeHerApp/1.0" },
+    });
+    attempt.status = response.status;
+    if (!response.ok) {
+      attempt.result = "non-2xx";
+      debugLog.push(attempt);
+      return [];
+    }
+    const data = await response.json();
+    attempt.elementCount = data.length;
+    attempt.result = "ok";
+    debugLog.push(attempt);
+    return data;
+  } catch (err) {
+    attempt.result = "network error";
+    attempt.errorMessage = err instanceof Error ? err.message : String(err);
+    debugLog.push(attempt);
+    return [];
+  }
 };
 
 const PoliceStationLocatorSection = () => {
@@ -91,6 +147,8 @@ const PoliceStationLocatorSection = () => {
   const [manualLocation, setManualLocation] = useState("");
 
   const [hasSearched, setHasSearched] = useState(false);
+  const [debugLog, setDebugLog] = useState<any[]>([]);
+  const [showDebug, setShowDebug] = useState(false);
 
   const parseStations = useCallback((data: any, lat: number, lon: number): PoliceStation[] => {
     return (data.elements || [])
@@ -118,28 +176,48 @@ const PoliceStationLocatorSection = () => {
       .sort((a: PoliceStation, b: PoliceStation) => (a.distance || 0) - (b.distance || 0));
   }, []);
 
-  // Fetch police stations from Overpass API, with mirror fallback and a
-  // widened-radius retry if the first pass turns up nothing (OSM's police
-  // station tagging is sparse in a lot of areas, especially in India).
+  // Fetch police stations from Overpass API, with mirror fallback, a
+  // widened-radius retry, and finally a Nominatim name-search fallback if
+  // Overpass's tag-based query still comes up empty (OSM tagging for police
+  // stations is inconsistent in a lot of areas, especially in India).
   const fetchPoliceStations = useCallback(async (lat: number, lon: number) => {
     setLoading(true);
     setError(null);
     setHasSearched(true);
+    const log: any[] = [];
 
     try {
-      let data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 10000));
-      // eslint-disable-next-line no-console
-      console.log("[PoliceStationLocator] Overpass response (10km):", data);
+      let data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 10000), log);
       let stations = parseStations(data, lat, lon);
 
       if (stations.length === 0) {
         // Widen to 25km before declaring "none found"
-        data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 25000));
-        // eslint-disable-next-line no-console
-        console.log("[PoliceStationLocator] Overpass response (25km):", data);
+        data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 25000), log);
         stations = parseStations(data, lat, lon);
       }
 
+      if (stations.length === 0) {
+        // Last resort: text-search OSM via Nominatim instead of tag filters
+        const nominatimResults = await searchNominatimForPolice(lat, lon, log);
+        stations = nominatimResults
+          .map((r: any) => {
+            const rLat = parseFloat(r.lat);
+            const rLon = parseFloat(r.lon);
+            if (!rLat || !rLon) return null;
+            return {
+              id: r.place_id.toString(),
+              name: r.display_name?.split(",")[0] || "Police Station",
+              address: r.display_name || "Address not available",
+              lat: rLat,
+              lon: rLon,
+              distance: calculateDistance(lat, lon, rLat, rLon),
+            };
+          })
+          .filter(Boolean)
+          .sort((a: PoliceStation, b: PoliceStation) => (a.distance || 0) - (b.distance || 0));
+      }
+
+      setDebugLog(log);
       setPoliceStations(stations);
 
       if (stations.length === 0) {
@@ -149,6 +227,7 @@ const PoliceStationLocatorSection = () => {
       }
     } catch (err) {
       console.error("Error fetching police stations:", err);
+      setDebugLog(log);
       setError(
         "Couldn't reach the police station database right now (the map service may be temporarily overloaded). Please try again in a moment."
       );
@@ -371,6 +450,24 @@ const PoliceStationLocatorSection = () => {
               Nearby Police Stations ({policeStations.length})
             </h3>
             <PoliceStationList stations={policeStations} loading={loading} userLocation={userLocation} />
+          </div>
+        )}
+
+        {/* Debug panel — shows exactly what each data source returned, so a
+            failed/empty search is diagnosable without opening DevTools. */}
+        {debugLog.length > 0 && !loading && (
+          <div className="pt-2 border-t border-border">
+            <button
+              onClick={() => setShowDebug((s) => !s)}
+              className="text-xs text-muted-foreground hover:text-foreground underline"
+            >
+              {showDebug ? "Hide" : "Show"} technical details ({debugLog.length} attempt{debugLog.length > 1 ? "s" : ""})
+            </button>
+            {showDebug && (
+              <pre className="mt-2 p-3 bg-muted/50 rounded-lg text-xs overflow-x-auto whitespace-pre-wrap">
+                {JSON.stringify(debugLog, null, 2)}
+              </pre>
+            )}
           </div>
         )}
       </CardContent>
