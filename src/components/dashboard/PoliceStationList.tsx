@@ -1,12 +1,25 @@
-import { MapPin, Navigation } from "lucide-react";
+import { MapPin, Navigation, ExternalLink } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import type { PoliceStation } from "./PoliceStationMap";
 
 interface PoliceStationListProps {
   stations: PoliceStation[];
   loading: boolean;
+  userLocation?: { lat: number; lon: number } | null;
 }
 
-const PoliceStationList = ({ stations, loading }: PoliceStationListProps) => {
+const PoliceStationList = ({ stations, loading, userLocation }: PoliceStationListProps) => {
+  const openDirections = (station: PoliceStation) => {
+    // Google Maps directions URL — works on desktop (opens Maps web) and on
+    // mobile (opens the Google Maps app if installed). Falls back to just
+    // the destination if we don't have the user's origin for some reason.
+    const destination = `${station.lat},${station.lon}`;
+    const url = userLocation
+      ? `https://www.google.com/maps/dir/?api=1&origin=${userLocation.lat},${userLocation.lon}&destination=${destination}&travelmode=driving`
+      : `https://www.google.com/maps/search/?api=1&query=${destination}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
   if (loading) {
     return (
       <div className="space-y-3">
@@ -31,7 +44,7 @@ const PoliceStationList = ({ stations, loading }: PoliceStationListProps) => {
   }
 
   return (
-    <div className="space-y-3 max-h-[300px] overflow-y-auto">
+    <div className="space-y-3 max-h-[400px] overflow-y-auto">
       {stations.map((station, index) => (
         <div
           key={station.id}
@@ -59,6 +72,18 @@ const PoliceStationList = ({ stations, loading }: PoliceStationListProps) => {
                 {station.distance.toFixed(2)} km
               </div>
             )}
+          </div>
+
+          <div className="mt-3 ml-8">
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={() => openDirections(station)}
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Get Directions
+            </Button>
           </div>
         </div>
       ))}
