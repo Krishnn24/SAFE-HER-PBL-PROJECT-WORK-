@@ -23,6 +23,65 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 };
 
+// Public Overpass API instances, tried in order. The default overpass-api.de
+// instance is a shared community server that frequently returns 429/504 or
+// times out under load — falling back to mirrors avoids the feature dying
+// outright whenever that one instance is unhappy.
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.osm.ch/api/interpreter",
+];
+
+const buildOverpassQuery = (lat: number, lon: number, radiusMeters: number) => `
+  [out:json][timeout:25];
+  (
+    node["amenity"="police"](around:${radiusMeters},${lat},${lon});
+    way["amenity"="police"](around:${radiusMeters},${lat},${lon});
+    relation["amenity"="police"](around:${radiusMeters},${lat},${lon});
+  );
+  out center;
+`;
+
+// Try each Overpass mirror in turn (each with its own timeout) until one
+// returns a usable response. Throws only if every mirror fails.
+const queryOverpassWithFallback = async (query: string): Promise<any> => {
+  let lastError: unknown = null;
+
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        body: `data=${encodeURIComponent(query)}`,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        // 429/504 etc — try the next mirror instead of giving up
+        lastError = new Error(`Overpass endpoint ${endpoint} returned ${response.status}`);
+        continue;
+      }
+
+      return await response.json();
+    } catch (err) {
+      clearTimeout(timeoutId);
+      lastError = err;
+      // network error, CORS rejection, or abort — try the next mirror
+      continue;
+    }
+  }
+
+  throw lastError ?? new Error("All Overpass endpoints failed");
+};
+
 const PoliceStationLocatorSection = () => {
   const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null);
   const [policeStations, setPoliceStations] = useState<PoliceStation[]>([]);
@@ -31,76 +90,66 @@ const PoliceStationLocatorSection = () => {
   const [error, setError] = useState<string | null>(null);
   const [manualLocation, setManualLocation] = useState("");
 
-  // Fetch police stations from Overpass API
+  const parseStations = useCallback((data: any, lat: number, lon: number): PoliceStation[] => {
+    return (data.elements || [])
+      .map((element: any) => {
+        const stationLat = element.lat || element.center?.lat;
+        const stationLon = element.lon || element.center?.lon;
+
+        if (!stationLat || !stationLon) return null;
+
+        const distance = calculateDistance(lat, lon, stationLat, stationLon);
+
+        return {
+          id: element.id.toString(),
+          name: element.tags?.name || "Police Station",
+          address: element.tags?.["addr:full"] ||
+                   element.tags?.["addr:street"] ||
+                   element.tags?.description ||
+                   "Address not available",
+          lat: stationLat,
+          lon: stationLon,
+          distance,
+        };
+      })
+      .filter(Boolean)
+      .sort((a: PoliceStation, b: PoliceStation) => (a.distance || 0) - (b.distance || 0));
+  }, []);
+
+  // Fetch police stations from Overpass API, with mirror fallback and a
+  // widened-radius retry if the first pass turns up nothing (OSM's police
+  // station tagging is sparse in a lot of areas, especially in India).
   const fetchPoliceStations = useCallback(async (lat: number, lon: number) => {
     setLoading(true);
     setError(null);
 
     try {
-      // Overpass API query for police stations within 10km radius
-      const query = `
-        [out:json][timeout:25];
-        (
-          node["amenity"="police"](around:10000,${lat},${lon});
-          way["amenity"="police"](around:10000,${lat},${lon});
-          relation["amenity"="police"](around:10000,${lat},${lon});
-        );
-        out center;
-      `;
+      let data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 10000));
+      let stations = parseStations(data, lat, lon);
 
-      const response = await fetch("https://overpass-api.de/api/interpreter", {
-        method: "POST",
-        body: `data=${encodeURIComponent(query)}`,
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to fetch police stations");
+      if (stations.length === 0) {
+        // Widen to 25km before declaring "none found"
+        data = await queryOverpassWithFallback(buildOverpassQuery(lat, lon, 25000));
+        stations = parseStations(data, lat, lon);
       }
-
-      const data = await response.json();
-
-      const stations: PoliceStation[] = data.elements
-        .map((element: any) => {
-          const stationLat = element.lat || element.center?.lat;
-          const stationLon = element.lon || element.center?.lon;
-
-          if (!stationLat || !stationLon) return null;
-
-          const distance = calculateDistance(lat, lon, stationLat, stationLon);
-
-          return {
-            id: element.id.toString(),
-            name: element.tags?.name || "Police Station",
-            address: element.tags?.["addr:full"] || 
-                     element.tags?.["addr:street"] || 
-                     element.tags?.description || 
-                     "Address not available",
-            lat: stationLat,
-            lon: stationLon,
-            distance,
-          };
-        })
-        .filter(Boolean)
-        .sort((a: PoliceStation, b: PoliceStation) => (a.distance || 0) - (b.distance || 0));
 
       setPoliceStations(stations);
 
       if (stations.length === 0) {
-        toast.info("No police stations found within 10km radius");
+        toast.info("No police stations found within 25km radius");
       } else {
         toast.success(`Found ${stations.length} police station${stations.length > 1 ? "s" : ""} nearby`);
       }
     } catch (err) {
       console.error("Error fetching police stations:", err);
-      setError("Failed to fetch nearby police stations. Please try again.");
+      setError(
+        "Couldn't reach the police station database right now (the map service may be temporarily overloaded). Please try again in a moment."
+      );
       toast.error("Failed to fetch police stations");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [parseStations]);
 
   // Get user's current location
   const getCurrentLocation = useCallback(() => {
