@@ -19,7 +19,6 @@ import {
 } from "@/services/sosService";
 import {
   prepareEmergencyMessages,
-  sendEmergencyMessages,
   buildOfflineEmergencyMessages,
 } from "@/services/emergencyMessageService";
 import { isOnline, sendOfflineSMSFallback } from "@/services/smsFallbackService";
@@ -175,21 +174,37 @@ export const SOSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
 
-        const messages = await prepareEmergencyMessages(
-          user.id,
-          alert.id,
-          location?.latitude || null,
-          location?.longitude || null
-        );
+        // Real SMS delivery via the notify-sos-contacts edge function
+        // (actually calls Twilio server-side). Falls back to direct device
+        // SMS only if that call fails outright or genuinely delivers to no
+        // one (e.g. a Twilio trial account rejecting unverified numbers).
+        let deliveredViaTwilio = false;
+        try {
+          const { data: notifyData, error: notifyError } = await supabase.functions.invoke(
+            "notify-sos-contacts",
+            { body: { alert_id: alert.id } }
+          );
 
-        const sendResult = await sendEmergencyMessages(messages);
+          if (notifyError) throw notifyError;
 
-        // Twilio isn't actually wired up yet (feature-flagged off), which
-        // means contacts never get notified at all otherwise — fall back to
-        // direct device SMS so the alert really goes out.
-        if (sendResult.sentCount === 0 && messages.length > 0) {
-          const fallback = await sendOfflineSMSFallback(messages);
-          console.log("[SOS Context] SMS fallback result:", fallback);
+          const results: any[] = notifyData?.results || [];
+          deliveredViaTwilio = results.some((r) => r.status === "sent");
+          console.log("[SOS Context] notify-sos-contacts result:", notifyData);
+        } catch (err) {
+          console.error("[SOS Context] notify-sos-contacts failed:", err);
+        }
+
+        if (!deliveredViaTwilio) {
+          const messages = await prepareEmergencyMessages(
+            user.id,
+            alert.id,
+            location?.latitude || null,
+            location?.longitude || null
+          );
+          if (messages.length > 0) {
+            const fallback = await sendOfflineSMSFallback(messages);
+            console.log("[SOS Context] Device SMS fallback result:", fallback);
+          }
         }
 
         toast({
