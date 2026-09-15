@@ -8,6 +8,7 @@ import FakeCallSection from "@/components/dashboard/FakeCallSection";
 import SOSAlertsSection from "@/components/dashboard/SOSAlertsSection";
 import ProfileSettingsSection from "@/components/dashboard/ProfileSettingsSection";
 import PoliceStationLocatorSection from "@/components/dashboard/PoliceStationLocatorSection";
+import CheckInTimerSection from "@/components/dashboard/CheckInTimerSection";
 import SOSButton from "@/components/sos/SOSButton";
 import SOSActiveOverlay from "@/components/sos/SOSActiveOverlay";
 import ShakeDetector from "@/components/sos/ShakeDetector";
@@ -143,6 +144,7 @@ const Dashboard = () => {
           </div>
 
           {/* Dashboard Sections */}
+          <CheckInTimerSection />
           <TrustedContactsSection />
           <SOSAlertsSection />
           <ProfileSettingsSection />
