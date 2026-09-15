@@ -1,18 +1,10 @@
-import { useState, useEffect, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { useState, useRef } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { useAudioRecorder } from "@/hooks/useAudioRecorder";
-import { useGeolocation } from "@/hooks/useGeolocation";
-import { AlertTriangle, Loader2, Check, X, Mic } from "lucide-react";
+import { useSOSContext } from "@/contexts/SOSContext";
+import { AlertTriangle, Loader2, Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type SOSState =
-  | "idle"
-  | "confirming"
-  | "recording"
-  | "sending"
-  | "success"
-  | "error";
+type SOSState = "idle" | "confirming" | "sending" | "success" | "error";
 
 interface SOSButtonProps {
   variant?: "floating" | "inline";
@@ -20,9 +12,24 @@ interface SOSButtonProps {
   triggerMethod?: "manual" | "shake" | "pattern";
 }
 
-const RECORDING_DURATION = 5000;
 const RATE_LIMIT_MS = 20000;
+const HOLD_DURATION = 1500;
 
+// Maps this component's simplified prop values to SOSContext's TriggerMethod
+const TRIGGER_METHOD_MAP: Record<string, "manual_button" | "shake" | "pattern"> = {
+  manual: "manual_button",
+  shake: "shake",
+  pattern: "pattern",
+};
+
+/**
+ * The dashboard's main SOS button. All the actual work — creating the
+ * alert, recording audio, tracking location, and notifying contacts
+ * (via the notify-sos-contacts edge function, with a device-SMS fallback) —
+ * lives in SOSContext.triggerSOS, shared with the check-in timer, shake
+ * detection, and pattern-lock triggers. This component only owns the
+ * hold-to-confirm gesture and its own visual state.
+ */
 export const SOSButton = ({
   variant = "floating",
   onTrigger,
@@ -31,24 +38,16 @@ export const SOSButton = ({
   const [state, setState] = useState<SOSState>("idle");
   const [holdProgress, setHoldProgress] = useState(0);
   const [lastTriggerTime, setLastTriggerTime] = useState(0);
-  const [lastLocation, setLastLocation] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
 
   const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const { toast } = useToast();
-  const { startRecording, stopRecording } = useAudioRecorder();
-  const { getLocation } = useGeolocation();
-
-  const HOLD_DURATION = 1500;
+  const { triggerSOS: contextTriggerSOS, lastLocation } = useSOSContext();
 
   const clearTimers = () => {
     if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
-    if (progressIntervalRef.current)
-      clearInterval(progressIntervalRef.current);
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
     setHoldProgress(0);
   };
 
@@ -70,14 +69,12 @@ export const SOSButton = ({
     const startTime = Date.now();
     progressIntervalRef.current = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      setHoldProgress(
-        Math.min((elapsed / HOLD_DURATION) * 100, 100)
-      );
+      setHoldProgress(Math.min((elapsed / HOLD_DURATION) * 100, 100));
     }, 50);
 
     holdTimerRef.current = setTimeout(() => {
       clearTimers();
-      triggerSOS();
+      handleTrigger();
     }, HOLD_DURATION);
   };
 
@@ -88,95 +85,25 @@ export const SOSButton = ({
     }
   };
 
-  // 📍 Improved GPS reliability (2 attempts, no blocking)
-  const getReliableLocation = async () => {
-    const firstTry = await Promise.race([
-      getLocation(),
-      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
-    ]);
-
-    if (firstTry) return firstTry;
-
-    // retry once
-    await new Promise((r) => setTimeout(r, 800));
-    return await Promise.race([
-      getLocation(),
-      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
-    ]);
-  };
-
-  const triggerSOS = async () => {
+  const handleTrigger = async () => {
     setLastTriggerTime(Date.now());
-    setState("recording");
+    setState("sending");
     onTrigger?.();
 
     try {
-      await startRecording();
+      const method = TRIGGER_METHOD_MAP[triggerMethod] ?? "manual_button";
+      const success = await contextTriggerSOS(method);
 
-      const location = await getReliableLocation();
-      if (location) {
-        setLastLocation(location);
-      } else {
-        toast({
-          title: "Location unavailable",
-          description: "SOS sent without live location",
-          variant: "destructive",
-        });
+      if (!success) {
+        throw new Error("SOS trigger returned false");
       }
 
-      await new Promise((r) => setTimeout(r, RECORDING_DURATION));
-      const audioBlob = await stopRecording();
-
-      setState("sending");
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-
-      let audioPath: string | null = null;
-
-      if (audioBlob && audioBlob.size > 0) {
-        const fileName = `${user.id}/${Date.now()}.webm`;
-        const { error } = await supabase.storage
-          .from("sos-recordings")
-          .upload(fileName, audioBlob, {
-            contentType: "audio/webm",
-          });
-        if (!error) audioPath = fileName;
-      }
-
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("emergency_message")
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      const { error } = await supabase
-        .from("sos_alerts")
-        .insert({
-          user_id: user.id,
-          status: "active",
-          latitude: location?.latitude ?? null,
-          longitude: location?.longitude ?? null,
-          trigger_method: triggerMethod,
-          audio_url: audioPath,
-          notes:
-            profile?.emergency_message ||
-            "Emergency SOS triggered",
-        });
-
-      if (error) throw error;
-
+      // contextTriggerSOS already shows its own toast (with location/offline
+      // status and real notification outcome), so nothing extra needed here.
       setState("success");
-      toast({
-        title: "SOS Sent",
-        description: "Emergency alert created successfully",
-      });
-
       setTimeout(() => setState("idle"), 4000);
     } catch (err) {
-      console.error(err);
+      console.error("[SOSButton] Trigger failed:", err);
       setState("error");
       toast({
         title: "SOS Failed",
@@ -191,23 +118,21 @@ export const SOSButton = ({
 
   return (
     <div className="flex flex-col items-center gap-4">
-  <button
-    className={cn(
-      "gradient-sos flex items-center justify-center transition-all duration-300 select-none touch-none",
-      isFloating
-        ? "fixed bottom-6 right-6 w-20 h-20 rounded-full shadow-glow-sos z-50 animate-pulse-glow-sos hover:scale-110"
-        : "w-full py-3 rounded-xl"
-    )}
-    
-
+      <button
+        className={cn(
+          "gradient-sos flex items-center justify-center transition-all duration-300 select-none touch-none",
+          isFloating
+            ? "fixed bottom-6 right-6 w-20 h-20 rounded-full shadow-glow-sos z-50 animate-pulse-glow-sos hover:scale-110"
+            : "w-full py-3 rounded-xl"
+        )}
         onMouseDown={handleHoldStart}
         onMouseUp={handleHoldEnd}
         onMouseLeave={handleHoldEnd}
         onTouchStart={handleHoldStart}
         onTouchEnd={handleHoldEnd}
       >
-        {state === "recording" ? (
-          <Mic className="animate-pulse text-white" />
+        {state === "confirming" ? (
+          <AlertTriangle className="animate-pulse text-white" />
         ) : state === "sending" ? (
           <Loader2 className="animate-spin text-white" />
         ) : state === "success" ? (
@@ -219,7 +144,8 @@ export const SOSButton = ({
         )}
       </button>
 
-      {/* 🗺️ MAP PREVIEW (UI ONLY) */}
+      {/* Map preview — reads location from the shared SOSContext, so it
+          stays in sync with whatever the active alert is actually using */}
       {lastLocation && (
         <div className="w-full max-w-md rounded-xl overflow-hidden border">
           <iframe
