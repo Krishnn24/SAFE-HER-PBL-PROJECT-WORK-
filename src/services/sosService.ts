@@ -5,7 +5,7 @@
 
 import { supabase } from "@/integrations/supabase/client";
 
-export type TriggerMethod = "manual_button" | "shake" | "pattern" | "voice";
+export type TriggerMethod = "manual_button" | "shake" | "pattern" | "voice" | "checkin_timeout";
 export type AlertStatus = "active" | "resolved" | "cancelled";
 
 export interface SOSAlert {
