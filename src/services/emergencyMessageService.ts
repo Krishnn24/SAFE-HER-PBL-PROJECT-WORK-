@@ -33,8 +33,13 @@ export interface EmergencyMessage {
   alertId: string;
 }
 
+const CONTACTS_CACHE_KEY = "safeher_cached_trusted_contacts";
+const PROFILE_CACHE_KEY = "safeher_cached_profile";
+
 /**
- * Fetch all trusted contacts for a user
+ * Fetch all trusted contacts for a user. Also caches the result to
+ * localStorage so an offline SOS (see buildOfflineEmergencyMessages) can
+ * still reach someone without any network call.
  */
 export const fetchTrustedContacts = async (
   userId: string
@@ -47,15 +52,32 @@ export const fetchTrustedContacts = async (
       .order("is_primary", { ascending: false });
 
     if (error) throw error;
-    return data || [];
+    const contacts = data || [];
+    try {
+      localStorage.setItem(CONTACTS_CACHE_KEY, JSON.stringify(contacts));
+    } catch {
+      // localStorage unavailable — non-fatal, just means no offline fallback data
+    }
+    return contacts;
   } catch (err) {
     console.error("[Emergency Message] Failed to fetch contacts:", err);
     return [];
   }
 };
 
+/** Read the last successfully-fetched trusted contacts from local cache. */
+export const getCachedTrustedContacts = (): TrustedContact[] => {
+  try {
+    const raw = localStorage.getItem(CONTACTS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+};
+
 /**
- * Fetch user profile for emergency message personalization
+ * Fetch user profile for emergency message personalization. Also caches the
+ * result for offline use.
  */
 export const fetchUserProfile = async (
   userId: string
@@ -68,7 +90,13 @@ export const fetchUserProfile = async (
       .maybeSingle();
 
     if (error) throw error;
-    return data || { full_name: null, emergency_message: null, phone_number: null };
+    const profile = data || { full_name: null, emergency_message: null, phone_number: null };
+    try {
+      localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(profile));
+    } catch {
+      // non-fatal
+    }
+    return profile;
   } catch (err) {
     console.error("[Emergency Message] Failed to fetch profile:", err);
     return { full_name: null, emergency_message: null, phone_number: null };
@@ -112,6 +140,55 @@ export const reverseGeocode = async (
     console.error("[Emergency Message] Reverse geocoding failed:", err);
     return null;
   }
+};
+
+/**
+ * Build emergency messages entirely from cached local data — no Supabase
+ * calls, no reverse geocoding. Use this when navigator.onLine is false;
+ * prepareEmergencyMessages above will hang/fail without a connection.
+ */
+export const buildOfflineEmergencyMessages = (
+  alertId: string,
+  latitude: number | null,
+  longitude: number | null
+): EmergencyMessage[] => {
+  const contacts = getCachedTrustedContacts();
+  if (contacts.length === 0) {
+    console.log("[Emergency Message] No cached trusted contacts available offline");
+    return [];
+  }
+
+  let profile: { full_name: string | null; emergency_message: string | null } = {
+    full_name: null,
+    emergency_message: null,
+  };
+  try {
+    const raw = localStorage.getItem(PROFILE_CACHE_KEY);
+    if (raw) profile = JSON.parse(raw);
+  } catch {
+    // non-fatal — fall back to defaults below
+  }
+
+  const timestamp = new Date().toISOString();
+  const mapsUrl = generateMapsUrl(latitude, longitude);
+  const userName = profile.full_name || "A SafeHer user";
+  const customMessage = profile.emergency_message || "I need help! This is an emergency.";
+
+  return contacts.map((contact) => ({
+    recipientName: contact.name,
+    recipientPhone: contact.phone_number,
+    recipientEmail: contact.email,
+    userName,
+    message: customMessage,
+    location: {
+      latitude,
+      longitude,
+      address: null, // reverse geocoding needs network — coordinates + maps link only
+      googleMapsUrl: mapsUrl,
+    },
+    timestamp,
+    alertId,
+  }));
 };
 
 /**
